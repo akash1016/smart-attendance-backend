@@ -1,0 +1,6 @@
+
+.venv/
+__pycache__/
+uploads/
+database.db
+announcement_images/
