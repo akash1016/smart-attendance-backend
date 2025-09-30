@@ -6,7 +6,7 @@ import os, datetime, uuid, traceback, io
 from PIL import Image
 import numpy as np
 import cv2
-from models import Base, User, Attendance, Role, Profile, Announcement
+from models import Base, User, Attendance, Role, Profile, Announcement, Complaint
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ANNOUNCEMENT_IMAGE_FOLDER = os.path.join(BASE_DIR, 'announcement_images')
@@ -66,6 +66,35 @@ def seed():
         db.close()
 seed()
 
+# API to change password for a user
+@app.route('/auth/change-password', methods=['POST'])
+def change_password():
+    data = request.get_json() or {}
+    token = request.headers.get('Authorization') or data.get('token')
+    old_password = data.get('old_password')
+    new_password = data.get('new_password')
+    if not token or not token.startswith('demo-'):
+        return jsonify({'ok': False, 'msg': 'Missing or invalid token'}), 401
+    if not old_password or not new_password:
+        return jsonify({'ok': False, 'msg': 'old_password and new_password are required'}), 400
+    acting_username = token.replace('demo-', '', 1)
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter_by(username=acting_username).first()
+        if not user:
+            return jsonify({'ok': False, 'msg': 'User not found'}), 404
+        if user.password != old_password:
+            return jsonify({'ok': False, 'msg': 'Old password is incorrect'}), 400
+        user.password = new_password
+        db.commit()
+        return jsonify({'ok': True, 'msg': 'Password changed successfully'})
+    except Exception as e:
+        db.rollback()
+        return jsonify({'ok': False, 'msg': str(e)}), 500
+    finally:
+        db.close()
+
+
 # API to delete a student (Admin/Teacher only)
 @app.route('/admin/delete-student/<username>', methods=['DELETE'])
 def delete_student(username):
@@ -94,7 +123,12 @@ def delete_student(username):
         student_role = db.query(Role).filter_by(role_name='Student').first()
         if not student_role or profile.role_id != student_role.role_id:
             return jsonify({'ok': False, 'msg': 'User is not a student'}), 400
-        # Delete profile and user
+        # First, delete attendance records for this student (if any)
+        attendance_records = db.query(Attendance).filter_by(student_id=profile.profile_id).all()
+        for record in attendance_records:
+            db.delete(record)
+        db.flush()
+        # Then delete profile and user
         db.delete(profile)
         db.delete(user)
         db.commit()
@@ -113,6 +147,43 @@ def delete_student(username):
     finally:
         db.close()
 
+# API for students to submit complaints
+@app.route('/student/submit-complaint', methods=['POST'])
+def submit_complaint():
+    data = request.get_json() or {}
+    token = request.headers.get('Authorization') or data.get('token')
+    if not token or not token.startswith('demo-'):
+        return jsonify({'ok': False, 'msg': 'Missing or invalid token'}), 401
+    acting_username = token.replace('demo-', '', 1)
+    db = SessionLocal()
+    try:
+        acting_user = db.query(User).filter_by(username=acting_username).first()
+        if not acting_user:
+            return jsonify({'ok': False, 'msg': 'Invalid user for token'}), 401
+        acting_profile = db.query(Profile).filter_by(user_id=acting_user.user_id).first()
+        acting_role = db.query(Role).filter_by(role_id=acting_profile.role_id).first() if acting_profile else None
+        if not acting_role or acting_role.role_name != 'Student':
+            return jsonify({'ok': False, 'msg': 'Only students can submit complaints'}), 403
+        title = data.get('title')
+        description = data.get('description')
+        if not title or not description:
+            return jsonify({'ok': False, 'msg': 'Title and description are required'}), 400
+        from datetime import date
+        complaint = Complaint(
+            student_id=acting_profile.profile_id,
+            title=title,
+            description=description,
+            status='Open',
+            created_at=date.today()
+        )
+        db.add(complaint)
+        db.commit()
+        return jsonify({'ok': True, 'msg': 'Complaint submitted successfully'})
+    except Exception as e:
+        db.rollback()
+        return jsonify({'ok': False, 'msg': str(e)}), 500
+    finally:
+        db.close()
 
 # API to get usernames of all students
 @app.route('/admin/get-all-student-usernames', methods=['GET'])
@@ -148,6 +219,40 @@ def get_all_student_usernames():
     finally:
         db.close()
 
+# API to get all complaints (Admin only)
+@app.route('/admin/complaint-list', methods=['GET'])
+def complaint_list():
+    token = request.headers.get('Authorization') or request.args.get('token')
+    if not token or not token.startswith('demo-'):
+        return jsonify({'ok': False, 'msg': 'Missing or invalid token'}), 401
+    acting_username = token.replace('demo-', '', 1)
+    db = SessionLocal()
+    try:
+        acting_user = db.query(User).filter_by(username=acting_username).first()
+        if not acting_user:
+            return jsonify({'ok': False, 'msg': 'Invalid user for token'}), 401
+        acting_profile = db.query(Profile).filter_by(user_id=acting_user.user_id).first()
+        acting_role = db.query(Role).filter_by(role_id=acting_profile.role_id).first() if acting_profile else None
+        if not acting_role or acting_role.role_name != 'Admin':
+            return jsonify({'ok': False, 'msg': 'Only Admin can access complaint list'}), 403
+        complaints = db.query(Complaint).order_by(Complaint.created_at.desc()).all()
+        result = []
+        for c in complaints:
+            student = db.query(Profile).filter_by(profile_id=c.student_id).first()
+            user = db.query(User).filter_by(user_id=student.user_id).first() if student else None
+            result.append({
+                'complaint_id': c.complaint_id,
+                'student_username': user.username if user else None,
+                'title': c.title,
+                'description': c.description,
+                'status': c.status,
+                'created_at': c.created_at.isoformat()
+            })
+        return jsonify({'ok': True, 'complaints': result})
+    except Exception as e:
+        return jsonify({'ok': False, 'msg': str(e)}), 500
+    finally:
+        db.close()
 
 # API to add a new teacher (Admin only)
 @app.route('/admin/add-teacher', methods=['POST'])
@@ -700,14 +805,46 @@ def mark_attendance():
         db.close()
         return jsonify({'ok': False, 'msg': str(e)}), 500
 
-@app.route('/attendance/report', methods=['GET'])
-def attendance_report():
+# API to get attendance records for a student by username and date interval (all roles)
+@app.route('/attendance/get-records', methods=['POST'])
+def get_attendance_records():
+    data = request.get_json() or {}
+    username = data.get('username')
+    start_date = data.get('start_date')  # 'YYYY-MM-DD'
+    end_date = data.get('end_date')      # 'YYYY-MM-DD'
+    if not username or not start_date or not end_date:
+        return jsonify({'ok': False, 'msg': 'username, start_date, and end_date are required'}), 400
+    try:
+        start_dt = datetime.datetime.strptime(start_date, '%Y-%m-%d').date()
+        end_dt = datetime.datetime.strptime(end_date, '%Y-%m-%d').date()
+    except Exception:
+        return jsonify({'ok': False, 'msg': 'Invalid date format. Use YYYY-MM-DD'}), 400
     db = SessionLocal()
-    rows = db.query(Attendance).order_by(Attendance.timestamp.desc()).all()
-    data = [{'student':r.student_username,'timestamp':r.timestamp.isoformat()} for r in rows]
-    db.close()
-    return jsonify({'ok':True,'rows':data})
-
+    try:
+        user = db.query(User).filter_by(username=username).first()
+        if not user:
+            return jsonify({'ok': False, 'msg': 'User not found'}), 404
+        profile = db.query(Profile).filter_by(user_id=user.user_id).first()
+        if not profile:
+            return jsonify({'ok': False, 'msg': 'Profile not found'}), 404
+        records = db.query(Attendance).filter(
+            Attendance.student_id == profile.profile_id,
+            Attendance.attendance_date >= start_dt,
+            Attendance.attendance_date <= end_dt
+        ).order_by(Attendance.attendance_date.asc()).all()
+        result = []
+        for r in records:
+            result.append({
+                'attendance_id': r.attendance_id,
+                'attendance_date': r.attendance_date.isoformat(),
+                'status': r.status,
+                'remarks': r.remarks
+            })
+        return jsonify({'ok': True, 'records': result})
+    except Exception as e:
+        return jsonify({'ok': False, 'msg': str(e)}), 500
+    finally:
+        db.close()
 
 
 @app.route('/uploads/<path:filename>')
