@@ -1,6 +1,9 @@
 
-.venv/
-__pycache__/
-uploads/
+# Ignore virtual environment
+venv/
+
+# Ignore SQLite database file
 database.db
-announcement_images/
+
+# Ignore upload folder
+upload/

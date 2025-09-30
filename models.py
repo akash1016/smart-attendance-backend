@@ -1,3 +1,4 @@
+
 # models.py
 from sqlalchemy import Column, Integer, String, Enum, ForeignKey, Date, Text
 from sqlalchemy.orm import relationship
@@ -57,3 +58,13 @@ class Attendance(Base):
     remarks = Column(String(255))
     student = relationship('Profile', back_populates='attendance_records')
 
+# Complaint model
+class Complaint(Base):
+    __tablename__ = 'complaints'
+    complaint_id = Column(Integer, primary_key=True, autoincrement=True)
+    student_id = Column(Integer, ForeignKey('profiles.profile_id'), nullable=False)
+    title = Column(String(255), nullable=False)
+    description = Column(Text, nullable=False)
+    status = Column(Enum('Open', 'Closed', 'Resolved'), default='Open', nullable=False)
+    created_at = Column(Date, nullable=False)
+    student = relationship('Profile')
