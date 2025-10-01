@@ -94,6 +94,55 @@ def change_password():
     finally:
         db.close()
 
+# API to delete attendance records for a student by username and date interval (Admin/Teacher only)
+@app.route('/admin/delete-attendance-records', methods=['POST'])
+def delete_attendance_records():
+    data = request.get_json() or {}
+    token = request.headers.get('Authorization') or data.get('token')
+    username = data.get('username')
+    start_date = data.get('start_date')  # 'YYYY-MM-DD'
+    end_date = data.get('end_date')      # 'YYYY-MM-DD'
+    if not token or not token.startswith('demo-'):
+        return jsonify({'ok': False, 'msg': 'Missing or invalid token'}), 401
+    if not username or not start_date or not end_date:
+        return jsonify({'ok': False, 'msg': 'username, start_date, and end_date are required'}), 400
+    try:
+        start_dt = datetime.datetime.strptime(start_date, '%Y-%m-%d').date()
+        end_dt = datetime.datetime.strptime(end_date, '%Y-%m-%d').date()
+    except Exception:
+        return jsonify({'ok': False, 'msg': 'Invalid date format. Use YYYY-MM-DD'}), 400
+    acting_username = token.replace('demo-', '', 1)
+    db = SessionLocal()
+    try:
+        acting_user = db.query(User).filter_by(username=acting_username).first()
+        if not acting_user:
+            return jsonify({'ok': False, 'msg': 'Invalid user for token'}), 401
+        acting_profile = db.query(Profile).filter_by(user_id=acting_user.user_id).first()
+        acting_role = db.query(Role).filter_by(role_id=acting_profile.role_id).first() if acting_profile else None
+        if not acting_role or acting_role.role_name not in ('Teacher', 'Admin'):
+            return jsonify({'ok': False, 'msg': 'Only Teacher or Admin can delete attendance records'}), 403
+        user = db.query(User).filter_by(username=username).first()
+        if not user:
+            return jsonify({'ok': False, 'msg': 'User not found'}), 404
+        profile = db.query(Profile).filter_by(user_id=user.user_id).first()
+        if not profile:
+            return jsonify({'ok': False, 'msg': 'Profile not found'}), 404
+        records = db.query(Attendance).filter(
+            Attendance.student_id == profile.profile_id,
+            Attendance.attendance_date >= start_dt,
+            Attendance.attendance_date <= end_dt
+        ).all()
+        count = 0
+        for r in records:
+            db.delete(r)
+            count += 1
+        db.commit()
+        return jsonify({'ok': True, 'msg': f'Deleted {count} attendance records for {username} between {start_date} and {end_date}.'})
+    except Exception as e:
+        db.rollback()
+        return jsonify({'ok': False, 'msg': str(e)}), 500
+    finally:
+        db.close()
 
 # API to delete a student (Admin/Teacher only)
 @app.route('/admin/delete-student/<username>', methods=['DELETE'])
@@ -787,10 +836,23 @@ def mark_attendance():
             db.close()
             return jsonify({'ok': False, 'msg': 'Invalid image'}), 400
         label, conf = recognizer.predict(arr)
+        # Map label to username
+        label_mapping = get_label_mapping()
+        inv_label_mapping = {v: k for k, v in label_mapping.items()}
+        predicted_username = inv_label_mapping.get(label)
+
         if already_marked:
             db.close()
             return jsonify({'ok': False, 'msg': f'Attendance already marked for {username} today', 'conf': float(conf)}), 400
-        # Optionally, you can check if label matches selected username, but always mark for selected username
+
+        # Check if predicted username matches selected username and confidence is good
+        if predicted_username != username:
+            db.close()
+            return jsonify({'ok': False, 'msg': f'Face does not match selected student. Detected: {predicted_username}', 'conf': float(conf)}), 400
+        if conf > 70:
+            db.close()
+            return jsonify({'ok': False, 'msg': f'Face not recognized confidently (conf={conf:.2f}). Try again.', 'conf': float(conf)}), 400
+
         att = Attendance(
             student_id=profile.profile_id,
             attendance_date=today,
